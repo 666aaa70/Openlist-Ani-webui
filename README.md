@@ -87,44 +87,111 @@ Openlist-Ani-webui/
 
 ## 快速部署（Docker Compose / 1Panel V2）
 
-### 1. 准备环境变量
+项目通过 GitHub Actions 自动构建并发布 `linux/amd64` 与 `linux/arm64` 双架构镜像：
 
-```bash
-cp .env.example .env
+- `ghcr.io/666aaa70/openlist-ani-webui:latest`
+
+推荐使用 **`env_file: .env`** 方式部署，敏感信息统一放在 `.env` 中，不写进 `docker-compose.yml`（使用 `WEBUI_PASSWORD_HASH` 时也无需转义 `$` 符号）。
+
+### 1. 创建 `docker-compose.yml`
+
+```yaml
+services:
+  openlist-ani-webui:
+    image: ghcr.io/666aaa70/openlist-ani-webui:latest
+    container_name: openlist-ani-webui
+    restart: unless-stopped
+    network_mode: host
+    env_file:
+      - .env
+    volumes:
+      - webui_data:/data
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/api/v1/health/live', timeout=3)",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  webui_data:
 ```
 
-编辑 `.env`，至少修改以下两项：
+> 说明：上述配置适配 Openlist-Ani 官方默认的 `--network host` 部署方式，可直接通过 `http://127.0.0.1:26666` 访问本机 Openlist-Ani，且 `WEBUI_HOST=127.0.0.1` 仅监听本机回环地址，由 1Panel 反向代理对外提供 HTTPS。  
+> 若你的 Openlist-Ani 运行在 `1panel-network` 桥接网络中，可移除 `network_mode: host`，改为 `ports: ["127.0.0.1:8080:8080"]` 并加入外部网络 `1panel-network`，同时将 `.env` 中的 `OPENLIST_ANI_URL` 设为 `http://<openlist-ani容器名>:26666`（且需确保 Openlist-Ani 的 `config.toml` 中 `[backend] host = "0.0.0.0"`）。
 
-- `OPENLIST_ANI_URL`：指向 Openlist-Ani 内部地址（例如宿主机运行填 `http://host.docker.internal:26666`，同 Docker 网络填 `http://openlist-ani:26666`）。
-- `WEBUI_PASSWORD` 或 `WEBUI_PASSWORD_HASH`：管理员密码（**未配置时后端将拒绝启动**，防止弱口令暴露）。
+### 2. 创建 `.env` 配置文件
+
+在 `docker-compose.yml` 同目录新建 `.env`（完整可选项可参考 [.env.example](.env.example)）：
+
+```env
+# Openlist-Ani 内部服务地址（仅服务端保存，不直接暴露给浏览器）
+OPENLIST_ANI_URL=http://127.0.0.1:26666
+OPENLIST_ANI_TIMEOUT=30
+
+# WebUI 登录认证（WEBUI_PASSWORD 与 WEBUI_PASSWORD_HASH 二选一，未配置时拒绝启动）
+WEBUI_USERNAME=admin
+WEBUI_PASSWORD=change-me-to-a-strong-password
+# WEBUI_PASSWORD_HASH=
+
+# 仅监听宿主机 127.0.0.1:8080，由 1Panel OpenResty 反向代理提供 HTTPS
+# 若需局域网直接访问，改为 WEBUI_HOST=0.0.0.0 且 WEBUI_TRUST_PROXY=false
+WEBUI_HOST=127.0.0.1
+WEBUI_PORT=8080
+WEBUI_TRUST_PROXY=true
+WEBUI_COOKIE_SECURE=auto
+WEBUI_DEFAULT_POLL_INTERVAL=5
+WEBUI_DEFAULT_THEME=dark
+WEBUI_DEFAULT_LANGUAGE=zh-CN
+WEBUI_DATA_DIR=/data
+```
 
 推荐使用哈希密码替代明文密码：
 
 ```bash
-docker build -t openlist-ani-webui:latest .
-docker run --rm openlist-ani-webui:latest python -m app.security hash-password '你的高强度密码'
+docker run --rm ghcr.io/666aaa70/openlist-ani-webui:latest \
+  python -m app.security hash-password '你的高强度密码'
 ```
 
-将输出的 `scrypt$...` 填入 `.env` 的 `WEBUI_PASSWORD_HASH`，并清空 `WEBUI_PASSWORD`。
+将输出的 `scrypt$...` 填入 `.env` 的 `WEBUI_PASSWORD_HASH`，并删除或注释 `WEBUI_PASSWORD`（两者同时配置时优先使用 `WEBUI_PASSWORD_HASH`）。
 
-### 2. 启动容器
+### 3. 启动与更新
 
 ```bash
-docker compose up -d --build
+# 拉取镜像并后台启动
+docker compose up -d
+
+# 后续更新到最新版本
+docker compose pull && docker compose up -d
 ```
 
-默认仅绑定宿主机 `127.0.0.1:8080`（可通过 `.env` 中的 `WEBUI_BIND_IP` 和 `WEBUI_EXPOSE_PORT` 调整）。
+### 4. 1Panel V2 部署建议
 
-### 3. 1Panel V2 部署建议
-
-1. 在 1Panel V2 的 **容器 → 编排** 中导入本仓库的 `docker-compose.yml` 与 `.env`。
-2. 如 Openlist-Ani 与本服务均位于 `1panel-network` 网络中，取消 `docker-compose.yml` 中 `1panel-network` 注释，并将 `OPENLIST_ANI_URL` 设为 `http://openlist-ani:26666`（容器名需与您的 Openlist-Ani 容器一致）。
+1. 在 1Panel V2 的 **容器 → 编排** 中创建编排，填入上述 `docker-compose.yml`，并在同目录放置 `.env` 文件。
+2. 如需将持久化卷 `webui_data:/data` 改为宿主机目录（例如 `./data:/data`），因为容器以非 root 用户 `uid=1000` 运行，请先执行 `mkdir -p ./data && chown -R 1000:1000 ./data`。
 3. 在 1Panel V2 **网站 → 反向代理** 中新建站点并启用 HTTPS，将代理目标指向 `http://127.0.0.1:8080`，保持 `.env` 中 `WEBUI_TRUST_PROXY=true` 和 `WEBUI_COOKIE_SECURE=auto`，即可自动获得 HTTPS `Secure` Cookie 与真实客户端 IP 登录限流。
 4. 切勿在 1Panel 或路由器中直接将 Openlist-Ani 的 `26666` 端口映射到公网。
+5. 在 WebUI「系统设置」页面修改并保存的服务地址、超时、轮询间隔、主题与语言会持久化在 `/data/webui.db` 中并优先于环境变量默认值；账号密码始终仅从环境变量读取。
 
-### 多架构构建（AMD64 & ARM64）
+### 本地源码构建（可选）
 
 ```bash
+# 使用仓库自带 docker-compose.yml 本地构建启动
+cp .env.example .env
+docker compose up -d --build
+
+# 手动构建 AMD64 / ARM64 多架构镜像
 docker buildx build \
   --platform linux/amd64,linux/arm64 \
   -t openlist-ani-webui:latest \
