@@ -1,0 +1,65 @@
+# 兼容 1Panel V2 容器编排与标准 Docker Compose
+# 使用前请复制 .env.example 为 .env，并修改 WEBUI_PASSWORD 与 OPENLIST_ANI_URL
+
+services:
+  openlist-ani-webui:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: openlist-ani-webui:latest
+    container_name: openlist-ani-webui
+    restart: unless-stopped
+    ports:
+      - "${WEBUI_BIND_IP:-127.0.0.1}:${WEBUI_EXPOSE_PORT:-8080}:8080"
+    environment:
+      # Openlist-Ani 内部地址（仅服务端使用，不暴露给浏览器）
+      # 若 Openlist-Ani 以 host 网络运行在宿主机，请使用 http://host.docker.internal:26666
+      # 若两者在同一个 Docker 网络（如 1panel-network），可直接填 http://openlist-ani:26666
+      OPENLIST_ANI_URL: ${OPENLIST_ANI_URL:-http://host.docker.internal:26666}
+      OPENLIST_ANI_TIMEOUT: ${OPENLIST_ANI_TIMEOUT:-30}
+      WEBUI_ALLOWED_UPSTREAM_HOSTS: ${WEBUI_ALLOWED_UPSTREAM_HOSTS:-}
+      WEBUI_USERNAME: ${WEBUI_USERNAME:-admin}
+      WEBUI_PASSWORD: ${WEBUI_PASSWORD:-}
+      WEBUI_PASSWORD_HASH: ${WEBUI_PASSWORD_HASH:-}
+      WEBUI_SESSION_TTL_SECONDS: ${WEBUI_SESSION_TTL_SECONDS:-604800}
+      WEBUI_COOKIE_SECURE: ${WEBUI_COOKIE_SECURE:-auto}
+      WEBUI_TRUST_PROXY: ${WEBUI_TRUST_PROXY:-true}
+      WEBUI_ALLOWED_ORIGINS: ${WEBUI_ALLOWED_ORIGINS:-}
+      WEBUI_LOGIN_RATE_LIMIT_MAX: ${WEBUI_LOGIN_RATE_LIMIT_MAX:-5}
+      WEBUI_LOGIN_RATE_LIMIT_WINDOW_SECONDS: ${WEBUI_LOGIN_RATE_LIMIT_WINDOW_SECONDS:-300}
+      WEBUI_DEFAULT_POLL_INTERVAL: ${WEBUI_DEFAULT_POLL_INTERVAL:-5}
+      WEBUI_DEFAULT_THEME: ${WEBUI_DEFAULT_THEME:-dark}
+      WEBUI_DEFAULT_LANGUAGE: ${WEBUI_DEFAULT_LANGUAGE:-zh-CN}
+      WEBUI_DATA_DIR: /data
+      WEBUI_LOG_LEVEL: ${WEBUI_LOG_LEVEL:-info}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - webui_data:/data
+    # 在 1Panel V2 中接入现有网络时，可取消下方注释并将外部网络名改为 1panel-network
+    # networks:
+    #   - 1panel-network
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/api/v1/health/live', timeout=3)",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  webui_data:
+
+# networks:
+#   1panel-network:
+#     external: true
