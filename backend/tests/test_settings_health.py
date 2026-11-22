@@ -76,3 +76,40 @@ async def test_health_ready_degraded_and_unreachable(
     assert down.status_code == 200
     assert down.json()["upstream_reachable"] is False
     assert down.json()["error_code"] == "upstream_unreachable"
+
+
+async def test_health_detects_non_openlist_html_response(tmp_path) -> None:
+    from app.config import AppConfig
+    from app.main import create_app
+    from app.security import hash_password
+
+    def html_handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text="<html><body>Not Openlist-Ani</body></html>")
+
+    cfg = AppConfig(
+        openlist_ani_url="http://openlist.internal:5244",
+        webui_username="admin",
+        webui_password_hash=hash_password("Pass#123456"),
+        webui_data_dir=tmp_path / "data",
+        webui_cookie_secure="false",
+    )
+    app = create_app(cfg, upstream_transport=httpx.MockTransport(html_handler))
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://testserver",
+    ) as c:
+        login = await c.post(
+            "/api/v1/auth/login",
+            json={"username": "admin", "password": "Pass#123456"},
+        )
+        assert login.status_code == 200
+        assert "content-security-policy" in {k.lower() for k in login.headers.keys()}
+
+        health = await c.get("/api/v1/health")
+        assert health.status_code == 200
+        data = health.json()
+        assert data["upstream_reachable"] is True
+        assert data["upstream_live"] is False
+        assert data["upstream_ready"] is False
+        assert data["upstream_status"] == "invalid_response"
+        assert data["error_code"] == "upstream_invalid_response"

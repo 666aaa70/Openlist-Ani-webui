@@ -6,7 +6,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: openlist-ani-webui:latest
+    image: ghcr.io/666aaa70/openlist-ani-webui:latest
     container_name: openlist-ani-webui
     restart: unless-stopped
     ports:

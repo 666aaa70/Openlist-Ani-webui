@@ -124,6 +124,7 @@ async def logout(
         key=config.webui_session_cookie_name,
         path="/",
         httponly=True,
+        secure=is_secure_request(request, config),
         samesite="lax",
     )
     return LogoutResponse(success=True, message="已安全退出登录")

@@ -99,7 +99,7 @@ describe('NewDownloadModal MVP workflow', () => {
     await wrapper.find('#resolve-resource-btn').trigger('click')
     await flushPromises()
 
-    expect(api.resolveMagnet).toHaveBeenCalledWith(magnet, 30)
+    expect(api.resolveMagnet).toHaveBeenCalledWith(magnet, 30, expect.any(AbortSignal))
     expect((wrapper.find('#download-title-input').element as HTMLInputElement).value).toBe(
       '[LoliHouse] Frieren - 01-28 [BDRip 1080p]',
     )

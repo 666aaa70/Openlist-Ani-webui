@@ -85,6 +85,18 @@ async def test_magnet_resolve_preflight_create_and_completed_tracking(
     assert listed_after["tasks"][0]["state"] == "completed"
     assert listed_after["tasks"][0]["final_path"] == "/PikPak/Anime/葬送的芙莉莲/Season 01/葬送的芙莉莲 S01E01.mkv"
 
+    # 6. Subsequent poll reuses verified terminal snapshot instead of hammering GET /api/downloads/{id}
+    detail_calls_before = sum(
+        1 for method, path, _ in mock_upstream.calls if method == "GET" and path == f"/api/downloads/{task_id}"
+    )
+    list_cached = await client.get("/api/v1/downloads")
+    assert list_cached.status_code == 200
+    assert list_cached.json()["completed_count"] == 1
+    detail_calls_after = sum(
+        1 for method, path, _ in mock_upstream.calls if method == "GET" and path == f"/api/downloads/{task_id}"
+    )
+    assert detail_calls_after == detail_calls_before
+
 
 async def test_torrent_collection_hint_and_policy_conflict_confirmation(
     authed_client: tuple[httpx.AsyncClient, str],

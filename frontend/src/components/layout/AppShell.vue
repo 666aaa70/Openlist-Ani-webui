@@ -68,7 +68,7 @@ const currentPageTitle = computed(() => {
 })
 
 async function handleLogout(): Promise<void> {
-  downloadsStore.stopPolling()
+  downloadsStore.reset()
   await authStore.logout()
   await router.replace({ name: 'login' })
 }
@@ -94,8 +94,11 @@ watch(
 
 onMounted(async () => {
   await settingsStore.loadSettings()
+  if (!authStore.authenticated) return
   await Promise.all([downloadsStore.fetchDownloads(), healthStore.fetchHealth()])
-  downloadsStore.startPolling()
+  if (authStore.authenticated) {
+    downloadsStore.startPolling()
+  }
 })
 
 onBeforeUnmount(() => {

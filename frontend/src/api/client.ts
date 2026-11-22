@@ -133,17 +133,23 @@ export const api = {
   },
 
   // Resolve
-  resolveMagnet(magnet: string, metadataTimeout = 30): Promise<ResolveResourceResponse> {
+  resolveMagnet(
+    magnet: string,
+    metadataTimeout = 30,
+    signal?: AbortSignal,
+  ): Promise<ResolveResourceResponse> {
     return request<ResolveResourceResponse>('/api/v1/resolve/magnet', {
       method: 'POST',
       body: { magnet, metadata_timeout: metadataTimeout },
+      signal,
     })
   },
 
-  resolveTorrent(url: string): Promise<ResolveResourceResponse> {
+  resolveTorrent(url: string, signal?: AbortSignal): Promise<ResolveResourceResponse> {
     return request<ResolveResourceResponse>('/api/v1/resolve/torrent', {
       method: 'POST',
       body: { url },
+      signal,
     })
   },
 

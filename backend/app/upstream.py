@@ -111,20 +111,42 @@ class OpenlistAniClient:
     ) -> None:
         self._store = store
         self._transport = transport
+        self._client: httpx.AsyncClient | None = None
+        self._client_base_url: str = ""
 
-    def _build_client(self, *, timeout_seconds: float) -> httpx.AsyncClient:
-        settings = self._store.get_settings()
-        return httpx.AsyncClient(
-            base_url=settings.upstream_url,
-            timeout=httpx.Timeout(
-                connect=min(10.0, timeout_seconds),
-                read=timeout_seconds,
-                write=min(15.0, timeout_seconds),
-                pool=min(10.0, timeout_seconds),
-            ),
-            follow_redirects=False,
-            transport=self._transport,
+    def _timeout_for(self, timeout_seconds: float) -> httpx.Timeout:
+        return httpx.Timeout(
+            connect=min(10.0, timeout_seconds),
+            read=timeout_seconds,
+            write=min(15.0, timeout_seconds),
+            pool=min(10.0, timeout_seconds),
         )
+
+    async def _get_client(self) -> httpx.AsyncClient:
+        settings = self._store.get_settings()
+        base_url = settings.upstream_url
+        if self._client is not None and (
+            self._client.is_closed or self._client_base_url != base_url
+        ):
+            old = self._client
+            self._client = None
+            if not old.is_closed:
+                await old.aclose()
+
+        if self._client is None:
+            self._client = httpx.AsyncClient(
+                base_url=base_url,
+                follow_redirects=False,
+                transport=self._transport,
+                limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
+            )
+            self._client_base_url = base_url
+        return self._client
+
+    async def aclose(self) -> None:
+        if self._client is not None and not self._client.is_closed:
+            await self._client.aclose()
+        self._client = None
 
     async def _request_json(
         self,
@@ -139,8 +161,13 @@ class OpenlistAniClient:
         effective_timeout = timeout_override or settings.api_timeout_seconds
 
         try:
-            async with self._build_client(timeout_seconds=effective_timeout) as client:
-                response = await client.request(method, path, json=json_body)
+            client = await self._get_client()
+            response = await client.request(
+                method,
+                path,
+                json=json_body,
+                timeout=self._timeout_for(effective_timeout),
+            )
         except httpx.TimeoutException as exc:
             raise UpstreamTimeoutError() from exc
         except httpx.HTTPError as exc:
@@ -174,7 +201,7 @@ class OpenlistAniClient:
 
     async def check_health(self) -> ServiceHealthResponse:
         settings = self._store.get_settings()
-        probe_timeout = min(settings.api_timeout_seconds, 10.0)
+        probe_timeout = self._timeout_for(min(settings.api_timeout_seconds, 10.0))
         start = time.monotonic()
 
         live_ok = False
@@ -186,48 +213,58 @@ class OpenlistAniClient:
         error_message: str | None = None
 
         try:
-            async with self._build_client(timeout_seconds=probe_timeout) as client:
-                live_resp = await client.get("/health/live")
-                live_ok = live_resp.status_code == 200
-
-                ready_resp = await client.get("/health/ready")
-                latency_ms = int((time.monotonic() - start) * 1000)
+            client = await self._get_client()
+            live_resp = await client.get("/health/live", timeout=probe_timeout)
+            if live_resp.status_code == 200:
                 try:
-                    ready_data = ready_resp.json()
+                    live_data = live_resp.json()
+                    live_ok = isinstance(live_data, dict) and live_data.get("status") == "live"
                 except ValueError:
-                    ready_data = {}
+                    live_ok = False
 
-                if isinstance(ready_data, dict):
-                    ready_ok = bool(ready_data.get("ready", False)) and ready_resp.status_code == 200
-                    upstream_status = str(
-                        ready_data.get("status") or ("ready" if ready_ok else "not_ready")
-                    )
-                    raw_degraded = ready_data.get("degraded")
-                    if isinstance(raw_degraded, dict):
-                        degraded = {str(k): str(v) for k, v in raw_degraded.items()}
-                    raw_workers = ready_data.get("workers")
-                    if isinstance(raw_workers, dict):
+            ready_resp = await client.get("/health/ready", timeout=probe_timeout)
+            latency_ms = int((time.monotonic() - start) * 1000)
+            try:
+                ready_data: Any = ready_resp.json()
+            except ValueError:
+                ready_data = None
+
+            if isinstance(ready_data, dict) and ("status" in ready_data or "ready" in ready_data):
+                ready_ok = bool(ready_data.get("ready", False)) and ready_resp.status_code == 200
+                upstream_status = str(
+                    ready_data.get("status") or ("ready" if ready_ok else "not_ready")
+                )
+                raw_degraded = ready_data.get("degraded")
+                if isinstance(raw_degraded, dict):
+                    degraded = {str(k): str(v) for k, v in raw_degraded.items()}
+                raw_workers = ready_data.get("workers")
+                if isinstance(raw_workers, dict):
+                    try:
                         workers = UpstreamWorkersStatus(
                             running=int(raw_workers.get("running", 0)),
                             expected=int(raw_workers.get("expected", 0)),
                         )
-                else:
-                    upstream_status = "invalid_response"
-                    error_code = "upstream_invalid_response"
-                    error_message = "Openlist-Ani 健康检查返回了非 JSON 响应"
-
-                return ServiceHealthResponse(
-                    upstream_reachable=True,
-                    upstream_live=live_ok,
-                    upstream_ready=ready_ok,
-                    upstream_status=upstream_status,
-                    degraded=degraded,
-                    workers=workers,
-                    latency_ms=latency_ms,
-                    error_code=error_code,
-                    error_message=error_message,
-                    checked_at=_utc_now_iso(),
+                    except (TypeError, ValueError):
+                        workers = None
+            else:
+                upstream_status = "invalid_response"
+                error_code = "upstream_invalid_response"
+                error_message = (
+                    "目标地址返回的不是 Openlist-Ani 健康检查 JSON，请确认配置的是 Openlist-Ani 后端端口（默认 26666）"
                 )
+
+            return ServiceHealthResponse(
+                upstream_reachable=True,
+                upstream_live=live_ok,
+                upstream_ready=ready_ok,
+                upstream_status=upstream_status,
+                degraded=degraded,
+                workers=workers,
+                latency_ms=latency_ms,
+                error_code=error_code,
+                error_message=error_message,
+                checked_at=_utc_now_iso(),
+            )
         except httpx.TimeoutException:
             return ServiceHealthResponse(
                 upstream_reachable=False,

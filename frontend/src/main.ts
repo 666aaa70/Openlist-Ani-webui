@@ -19,7 +19,7 @@ const downloadsStore = useDownloadsStore(pinia)
 configureApiClient({
   getCsrfToken: () => authStore.csrfToken,
   onUnauthorized: () => {
-    downloadsStore.stopPolling()
+    downloadsStore.reset()
     authStore.clearSession()
     if (router.currentRoute.value.name !== 'login') {
       void router.replace({

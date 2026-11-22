@@ -29,6 +29,7 @@ export const useDownloadsStore = defineStore('downloads', () => {
   let pollTimer: number | null = null
   let inFlight = false
   let visibilityBound = false
+  let inspectSeq = 0
 
   async function fetchDownloads(options: { silent?: boolean } = {}): Promise<void> {
     if (inFlight) return
@@ -76,6 +77,8 @@ export const useDownloadsStore = defineStore('downloads', () => {
   async function inspectTask(taskId: string): Promise<DownloadTaskResponse | null> {
     const cleaned = taskId.trim()
     if (!cleaned) return null
+    inspectSeq += 1
+    const mySeq = inspectSeq
     selectedTaskLoading.value = true
     selectedTaskError.value = null
     const existing = tasks.value.find((t) => t.id === cleaned)
@@ -84,6 +87,7 @@ export const useDownloadsStore = defineStore('downloads', () => {
     }
     try {
       const fresh = await api.getDownload(cleaned)
+      if (mySeq !== inspectSeq) return null
       selectedTask.value = fresh
       // Merge into local tasks list if newly discovered via historical task ID lookup
       const idx = tasks.value.findIndex((t) => t.id === fresh.id)
@@ -95,10 +99,13 @@ export const useDownloadsStore = defineStore('downloads', () => {
       }
       return fresh
     } catch (err) {
+      if (mySeq !== inspectSeq) return null
       selectedTaskError.value = err instanceof ApiClientError ? err.message : '无法加载任务详情'
       return null
     } finally {
-      selectedTaskLoading.value = false
+      if (mySeq === inspectSeq) {
+        selectedTaskLoading.value = false
+      }
     }
   }
 
@@ -112,8 +119,27 @@ export const useDownloadsStore = defineStore('downloads', () => {
   }
 
   function closeTaskDetail(): void {
+    inspectSeq += 1
     selectedTask.value = null
     selectedTaskError.value = null
+    selectedTaskLoading.value = false
+  }
+
+  function reset(): void {
+    stopPolling()
+    closeTaskDetail()
+    newDownloadModalOpen.value = false
+    tasks.value = []
+    total.value = 0
+    activeCount.value = 0
+    completedCount.value = 0
+    failedCount.value = 0
+    cancelledCount.value = 0
+    syncedAt.value = null
+    error.value = null
+    errorCode.value = null
+    initialLoading.value = false
+    refreshing.value = false
   }
 
   function openNewDownloadModal(): void {
@@ -183,6 +209,7 @@ export const useDownloadsStore = defineStore('downloads', () => {
     fetchDownloads,
     inspectTask,
     closeTaskDetail,
+    reset,
     openNewDownloadModal,
     closeNewDownloadModal,
     refreshAll,

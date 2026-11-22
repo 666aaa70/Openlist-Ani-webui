@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { onMounted, ref, watch } from 'vue'
 import {
   CheckCircle2,
   Globe,
@@ -37,6 +37,20 @@ function syncFromStore(): void {
   theme.value = settingsStore.theme
   language.value = settingsStore.language
 }
+
+watch(
+  () => settingsStore.theme,
+  (next) => {
+    theme.value = next
+  },
+)
+
+watch(
+  () => settingsStore.language,
+  (next) => {
+    language.value = next
+  },
+)
 
 onMounted(async () => {
   await settingsStore.loadSettings()
@@ -169,7 +183,7 @@ async function handleTestConnection(): Promise<void> {
                   : 'text-rose-600 dark:text-rose-300'
               "
             >
-              <template v-if="testResult.upstream_reachable">
+              <template v-if="testResult.upstream_reachable && !testResult.error_code">
                 已连通（状态: {{ testResult.upstream_status }}
                 <template v-if="testResult.workers">
                   · 线程 {{ testResult.workers.running }}/{{ testResult.workers.expected }}

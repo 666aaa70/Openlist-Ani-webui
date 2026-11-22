@@ -25,8 +25,6 @@ from ..upstream import OpenlistAniClient, UpstreamError
 
 router = APIRouter(prefix="/api/v1", tags=["downloads"])
 
-TERMINAL_STATES = frozenset({"completed", "failed", "cancelled"})
-
 
 @router.post("/resolve/magnet", response_model=ResolveResourceResponse)
 async def resolve_magnet(
@@ -58,6 +56,15 @@ async def preflight_download(
     return await upstream.preflight_download(payload)
 
 
+IMMUTABLE_TERMINAL_STATES = frozenset({"completed", "cancelled"})
+
+
+def _snapshot_for_storage(task: DownloadTaskResponse) -> str | None:
+    if task.state in IMMUTABLE_TERMINAL_STATES:
+        return task.model_dump_json()
+    return None
+
+
 @router.post("/downloads", response_model=CreateDownloadResponse)
 async def create_download(
     payload: CreateDownloadRequest,
@@ -67,7 +74,9 @@ async def create_download(
 ) -> CreateDownloadResponse:
     result = await upstream.create_download(payload)
     if result.success and result.task is not None:
-        store.record_tasks([(result.task.id, result.task.state)])
+        store.record_tasks(
+            [(result.task.id, result.task.state, _snapshot_for_storage(result.task))]
+        )
     return result
 
 
@@ -82,12 +91,24 @@ async def list_downloads(
 
     # Record all currently listed real task IDs so we can verify their final state
     # via GET /api/downloads/{task_id} once they complete and leave GET /api/downloads.
-    store.record_tasks([(task.id, task.state) for task in live_tasks])
+    store.record_tasks(
+        [(task.id, task.state, _snapshot_for_storage(task)) for task in live_tasks]
+    )
 
     tracked_records = store.list_tracked_task_ids(limit=100)
-    missing_ids = [rec.task_id for rec in tracked_records if rec.task_id not in by_id]
+    missing_to_fetch: list[str] = []
+    for rec in tracked_records:
+        if rec.task_id in by_id:
+            continue
+        if rec.last_state in IMMUTABLE_TERMINAL_STATES and rec.payload_json:
+            try:
+                by_id[rec.task_id] = DownloadTaskResponse.model_validate_json(rec.payload_json)
+                continue
+            except Exception:
+                pass
+        missing_to_fetch.append(rec.task_id)
 
-    if missing_ids:
+    if missing_to_fetch:
         semaphore = asyncio.Semaphore(6)
 
         async def _fetch_tracked(task_id: str) -> tuple[str, DownloadTaskResponse | None, bool]:
@@ -98,17 +119,17 @@ async def list_downloads(
                 except (UpstreamError, ValueError):
                     return task_id, None, True
 
-        fetched = await asyncio.gather(*(_fetch_tracked(tid) for tid in missing_ids))
-        updated_pairs: list[tuple[str, str]] = []
+        fetched = await asyncio.gather(*(_fetch_tracked(tid) for tid in missing_to_fetch))
+        updated_entries: list[tuple[str, str, str | None]] = []
         for task_id, item, had_error in fetched:
             if item is not None:
                 by_id[item.id] = item
-                updated_pairs.append((item.id, item.state))
+                updated_entries.append((item.id, item.state, _snapshot_for_storage(item)))
             elif not had_error:
                 # 404 from Openlist-Ani -> task no longer exists upstream
                 store.remove_tracked_task(task_id)
-        if updated_pairs:
-            store.record_tasks(updated_pairs)
+        if updated_entries:
+            store.record_tasks(updated_entries)
 
     merged = sorted(by_id.values(), key=lambda t: t.created_at, reverse=True)
     completed_count = sum(1 for t in merged if t.state == "completed")
@@ -144,9 +165,10 @@ async def get_download(
 
     task = await upstream.get_download(safe_id)
     if task is None:
+        store.remove_tracked_task(safe_id)
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail={"code": "task_not_found", "message": f"未找到任务: {safe_id}"},
         )
-    store.record_tasks([(task.id, task.state)])
+    store.record_tasks([(task.id, task.state, _snapshot_for_storage(task))])
     return task

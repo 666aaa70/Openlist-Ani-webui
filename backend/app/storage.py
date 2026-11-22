@@ -38,6 +38,7 @@ class TrackedTaskRecord:
     last_state: str
     first_seen_at: int
     last_seen_at: int
+    payload_json: str = ""
 
 
 class StateStore:
@@ -85,13 +86,23 @@ class StateStore:
                     task_id TEXT PRIMARY KEY,
                     last_state TEXT NOT NULL DEFAULT 'pending',
                     first_seen_at INTEGER NOT NULL,
-                    last_seen_at INTEGER NOT NULL
+                    last_seen_at INTEGER NOT NULL,
+                    payload_json TEXT NOT NULL DEFAULT ''
                 );
 
                 CREATE INDEX IF NOT EXISTS idx_tracked_tasks_last_seen
                     ON tracked_tasks(last_seen_at DESC);
                 """
             )
+            # Safe schema migration for existing DBs created before payload_json existed
+            columns = {
+                str(row["name"])
+                for row in conn.execute("PRAGMA table_info(tracked_tasks)").fetchall()
+            }
+            if "payload_json" not in columns:
+                conn.execute(
+                    "ALTER TABLE tracked_tasks ADD COLUMN payload_json TEXT NOT NULL DEFAULT ''"
+                )
 
     # ── Sessions ──────────────────────────────────────────────────────
 
@@ -159,17 +170,22 @@ class StateStore:
             if int(row["expires_at"]) <= now:
                 conn.execute("DELETE FROM sessions WHERE token_hash = ?", (token_hash,))
                 return None
-            conn.execute(
-                "UPDATE sessions SET last_seen_at = ? WHERE token_hash = ?",
-                (now, token_hash),
-            )
+            prev_seen = int(row["last_seen_at"])
+            effective_seen = prev_seen
+            # Throttle SQLite write amplification during 5s polling
+            if now - prev_seen >= 60:
+                conn.execute(
+                    "UPDATE sessions SET last_seen_at = ? WHERE token_hash = ?",
+                    (now, token_hash),
+                )
+                effective_seen = now
             return SessionRecord(
                 token_hash=str(row["token_hash"]),
                 username=str(row["username"]),
                 csrf_token=str(row["csrf_token"]),
                 created_at=int(row["created_at"]),
                 expires_at=int(row["expires_at"]),
-                last_seen_at=now,
+                last_seen_at=effective_seen,
             )
 
     def delete_session(self, raw_token: str) -> None:
@@ -270,21 +286,28 @@ class StateStore:
     # task IDs observed by WebUI lets us fetch genuine completed/cancelled status
     # strictly from Openlist-Ani's official GET /api/downloads/{task_id} endpoint.
 
-    def record_tasks(self, pairs: list[tuple[str, str]]) -> None:
-        if not pairs:
+    def record_tasks(self, entries: list[tuple[str, str, str | None]]) -> None:
+        if not entries:
             return
         now = int(time.time())
         with self._lock, self._connect() as conn:
-            for task_id, state in pairs:
+            for task_id, state, payload_json in entries:
+                payload = payload_json or ""
                 conn.execute(
                     """
-                    INSERT INTO tracked_tasks (task_id, last_state, first_seen_at, last_seen_at)
-                    VALUES (?, ?, ?, ?)
+                    INSERT INTO tracked_tasks (
+                        task_id, last_state, first_seen_at, last_seen_at, payload_json
+                    )
+                    VALUES (?, ?, ?, ?, ?)
                     ON CONFLICT(task_id) DO UPDATE SET
                         last_state = excluded.last_state,
-                        last_seen_at = excluded.last_seen_at
+                        last_seen_at = excluded.last_seen_at,
+                        payload_json = CASE
+                            WHEN excluded.payload_json != '' THEN excluded.payload_json
+                            ELSE tracked_tasks.payload_json
+                        END
                     """,
-                    (task_id, state, now, now),
+                    (task_id, state, now, now, payload),
                 )
             # Keep bounded history (most recent 200 observed tasks)
             conn.execute(
@@ -302,7 +325,7 @@ class StateStore:
         with self._lock, self._connect() as conn:
             rows = conn.execute(
                 """
-                SELECT task_id, last_state, first_seen_at, last_seen_at
+                SELECT task_id, last_state, first_seen_at, last_seen_at, payload_json
                 FROM tracked_tasks
                 ORDER BY last_seen_at DESC
                 LIMIT ?
@@ -315,6 +338,7 @@ class StateStore:
                 last_state=str(row["last_state"]),
                 first_seen_at=int(row["first_seen_at"]),
                 last_seen_at=int(row["last_seen_at"]),
+                payload_json=str(row["payload_json"] or ""),
             )
             for row in rows
         ]

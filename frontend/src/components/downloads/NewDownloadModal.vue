@@ -51,6 +51,8 @@ const submitError = ref<string | null>(null)
 const submitBlockedMessage = ref<string | null>(null)
 
 let autoResolveTimer: number | null = null
+let resolveAbortController: AbortController | null = null
+let resolveSeq = 0
 
 const detectedType = computed(() => detectResourceType(rawLink.value))
 
@@ -74,6 +76,15 @@ const canRunSubmit = computed(() => {
   return true
 })
 
+function cancelInFlightResolve(): void {
+  resolveSeq += 1
+  if (resolveAbortController) {
+    resolveAbortController.abort()
+    resolveAbortController = null
+  }
+  resolving.value = false
+}
+
 function resetPreflightState(): void {
   preflightResult.value = null
   pendingConflicts.value = []
@@ -89,12 +100,12 @@ function resetAll(): void {
     window.clearTimeout(autoResolveTimer)
     autoResolveTimer = null
   }
+  cancelInFlightResolve()
   rawLink.value = ''
   metadataTimeout.value = 30
   title.value = ''
   collectionHint.value = false
   userEditedCollectionHint.value = false
-  resolving.value = false
   resolveError.value = null
   resolved.value = null
   preflighting.value = false
@@ -110,6 +121,14 @@ watch(
     }
   },
 )
+
+// Changing the resource URL invalidates any prior resolve result and in-flight lookup
+watch(rawLink, () => {
+  cancelInFlightResolve()
+  resolved.value = null
+  resolveError.value = null
+  userEditedCollectionHint.value = false
+})
 
 // Invalidate preflight confirmation whenever user edits URL, title, or collection_hint
 // because Openlist-Ani binds policy_review_token via HMAC to these exact fields.
@@ -138,6 +157,14 @@ async function runResolve(): Promise<void> {
     return
   }
 
+  cancelInFlightResolve()
+  const mySeq = resolveSeq
+  const controller = new AbortController()
+  resolveAbortController = controller
+
+  const safeTimeout = Math.min(120, Math.max(5, Math.round(Number(metadataTimeout.value) || 30)))
+  metadataTimeout.value = safeTimeout
+
   resolving.value = true
   resolveError.value = null
   resolved.value = null
@@ -146,8 +173,10 @@ async function runResolve(): Promise<void> {
   try {
     const data =
       type === 'magnet'
-        ? await api.resolveMagnet(cleaned, metadataTimeout.value)
-        : await api.resolveTorrent(cleaned)
+        ? await api.resolveMagnet(cleaned, safeTimeout, controller.signal)
+        : await api.resolveTorrent(cleaned, controller.signal)
+
+    if (mySeq !== resolveSeq || !props.open) return
 
     resolved.value = data
     if (data.title && data.title.trim()) {
@@ -161,9 +190,15 @@ async function runResolve(): Promise<void> {
       collectionHint.value = data.collection_hint
     }
   } catch (err) {
+    if (mySeq !== resolveSeq || (err instanceof ApiClientError && err.code === 'aborted')) {
+      return
+    }
     resolveError.value = err instanceof ApiClientError ? err.message : '解析资源失败，请检查 Openlist-Ani 连接'
   } finally {
-    resolving.value = false
+    if (mySeq === resolveSeq) {
+      resolving.value = false
+      resolveAbortController = null
+    }
   }
 }
 
@@ -282,6 +317,7 @@ onMounted(() => window.addEventListener('keydown', handleKeydown))
 onBeforeUnmount(() => {
   window.removeEventListener('keydown', handleKeydown)
   if (autoResolveTimer !== null) window.clearTimeout(autoResolveTimer)
+  cancelInFlightResolve()
 })
 </script>
 

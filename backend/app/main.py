@@ -56,8 +56,11 @@ def create_app(
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         logger.info("Openlist-Ani WebUI backend initialized")
-        yield
-        logger.info("Openlist-Ani WebUI backend shutting down")
+        try:
+            yield
+        finally:
+            await upstream.aclose()
+            logger.info("Openlist-Ani WebUI backend shutting down")
 
     app = FastAPI(
         title="Openlist-Ani WebUI Backend",
@@ -81,6 +84,14 @@ def create_app(
         response.headers.setdefault("Referrer-Policy", "same-origin")
         response.headers.setdefault(
             "Permissions-Policy", "camera=(), microphone=(), geolocation=()"
+        )
+        response.headers.setdefault(
+            "Content-Security-Policy",
+            (
+                "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+                "img-src 'self' data:; font-src 'self' data:; connect-src 'self'; "
+                "frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+            ),
         )
         if request.url.path.startswith("/api/"):
             response.headers["Cache-Control"] = "no-store"
